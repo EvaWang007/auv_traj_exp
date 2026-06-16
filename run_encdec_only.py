@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+import argparse
+import importlib.util
+import sys
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+SRC = REPO_ROOT / "auv_trajectory_smoke_experiment.py"
+
+
+def load_src():
+    spec = importlib.util.spec_from_file_location("auv_smoke_encdec_only", SRC)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class EncoderDecoderLSTMPredictor(nn.Module):
+    def __init__(self, input_dim=5, hidden_dim=128, pred_len=25, decoder_input_dim=2):
+        super().__init__()
+        self.pred_len = pred_len
+        self.encoder = nn.LSTM(input_dim, hidden_dim, num_layers=1, batch_first=True)
+        self.decoder = nn.LSTM(decoder_input_dim, hidden_dim, num_layers=1, batch_first=True)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 2),
+        )
+
+    def forward(self, x, decoder_init, target_seq=None, teacher_forcing_ratio=0.0):
+        _, (h, c) = self.encoder(x)
+        decoder_input = decoder_init.unsqueeze(1)
+        outputs = []
+        for step_idx in range(self.pred_len):
+            dec_out, (h, c) = self.decoder(decoder_input, (h, c))
+            pred_step = self.head(dec_out.squeeze(1))
+            outputs.append(pred_step.unsqueeze(1))
+
+            if self.training and target_seq is not None and teacher_forcing_ratio > 0.0:
+                teacher_mask = (torch.rand(x.size(0), device=x.device) < teacher_forcing_ratio).float().unsqueeze(1)
+                next_input = teacher_mask * target_seq[:, step_idx, :] + (1.0 - teacher_mask) * pred_step
+            else:
+                next_input = pred_step
+            decoder_input = next_input.unsqueeze(1)
+
+        return torch.cat(outputs, dim=1)
+
+
+def get_decoder_init_norm(xraw: torch.Tensor, y_scaler, device: str) -> torch.Tensor:
+    y_mean = torch.tensor(y_scaler.mean[:2], dtype=torch.float32, device=device)
+    y_std = torch.tensor(y_scaler.std[:2], dtype=torch.float32, device=device)
+    last_nav = xraw[:, -1, :2].to(device)
+    return (last_nav - y_mean) / y_std
+
+
+def train_encdec_model(
+    module,
+    name: str,
+    model: nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    y_scaler,
+    dt: float,
+    lambda_phy: float,
+    epochs: int,
+    lr: float,
+    teacher_forcing_ratio: float,
+    device: str,
+):
+    model.to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    best_val = float("inf")
+    best_state = None
+    position_scale = float(np.mean(y_scaler.std))
+
+    for ep in range(1, epochs + 1):
+        model.train()
+        total = 0.0
+        for xb, yb, xraw, _ in train_loader:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            xraw = xraw.to(device)
+            dec0 = get_decoder_init_norm(xraw, y_scaler, device)
+
+            pred = model(xb, dec0, target_seq=yb, teacher_forcing_ratio=teacher_forcing_ratio)
+            data_loss = torch.mean((pred - yb) ** 2)
+            if lambda_phy > 0:
+                phy = module.physics_loss_lstm(pred, xraw, y_scaler, dt=dt, position_scale=position_scale)
+                loss = data_loss + lambda_phy * phy
+            else:
+                loss = data_loss
+
+            opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 2.0)
+            opt.step()
+            total += loss.item() * len(xb)
+
+        val_loss = evaluate_encdec_loss(module, model, val_loader, y_scaler, dt, lambda_phy, device)
+        if val_loss < best_val:
+            best_val = val_loss
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+        if ep == 1 or ep % 10 == 0 or ep == epochs:
+            print(
+                f"[{name}] epoch={ep:03d} "
+                f"train_loss={total/len(train_loader.dataset):.6f} "
+                f"val_mse={val_loss:.6f}"
+            )
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model
+
+
+@torch.no_grad()
+def evaluate_encdec_loss(module, model: nn.Module, loader: DataLoader, y_scaler, dt: float, lambda_phy: float, device: str) -> float:
+    model.eval()
+    total = 0.0
+    position_scale = float(np.mean(y_scaler.std))
+    for xb, yb, xraw, _ in loader:
+        xb = xb.to(device)
+        yb = yb.to(device)
+        xraw = xraw.to(device)
+        dec0 = get_decoder_init_norm(xraw, y_scaler, device)
+        pred = model(xb, dec0)
+        data_loss = torch.mean((pred - yb) ** 2)
+        if lambda_phy > 0:
+            phy = module.physics_loss_lstm(pred, xraw, y_scaler, dt=dt, position_scale=position_scale)
+            loss = data_loss + lambda_phy * phy
+        else:
+            loss = data_loss
+        total += loss.item() * len(xb)
+    return total / len(loader.dataset)
+
+
+@torch.no_grad()
+def predict_encdec_model(model: nn.Module, loader: DataLoader, y_scaler, device: str):
+    model.eval()
+    preds, trues = [], []
+    for xb, _, xraw, yraw in loader:
+        xb = xb.to(device)
+        xraw = xraw.to(device)
+        dec0 = get_decoder_init_norm(xraw, y_scaler, device)
+        pred_norm = model(xb, dec0).cpu().numpy()
+        pred = y_scaler.inverse_transform(pred_norm)
+        preds.append(pred)
+        trues.append(yraw.numpy())
+    return np.concatenate(preds), np.concatenate(trues)
+
+
+def run_encdec_only(module, npz_path: Path, out_dir: Path, label: str, args):
+    print(f"\n=== Running EncDec-only dataset: {label} ===")
+    loaded = np.load(npz_path)
+    data = loaded["data"]
+
+    train_traj, val_traj, test_traj = module.split_by_trajectory(data, 0.7, 0.1)
+    X_train, Y_train = module.make_windows(train_traj, args.input_len, args.pred_len)
+    X_val, Y_val = module.make_windows(val_traj, args.input_len, args.pred_len)
+    X_test, Y_test = module.make_windows(test_traj, args.input_len, args.pred_len)
+
+    x_scaler = module.Standardizer().fit(X_train)
+    y_scaler = module.Standardizer().fit(Y_train)
+
+    train_ds = module.AUVDataset(X_train, Y_train, x_scaler, y_scaler)
+    val_ds = module.AUVDataset(X_val, Y_val, x_scaler, y_scaler)
+    test_ds = module.AUVDataset(X_test, Y_test, x_scaler, y_scaler)
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
+
+    device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    print(f"device={device}, train_windows={len(train_ds)}, val_windows={len(val_ds)}, test_windows={len(test_ds)}")
+
+    encdec = EncoderDecoderLSTMPredictor(
+        input_dim=5,
+        hidden_dim=args.hidden_dim,
+        pred_len=args.pred_len,
+        decoder_input_dim=2,
+    )
+    encdec = train_encdec_model(
+        module,
+        "EncDec_LSTM",
+        encdec,
+        train_loader,
+        val_loader,
+        y_scaler,
+        dt=args.dt,
+        lambda_phy=0.0,
+        epochs=args.epochs,
+        lr=args.lr,
+        teacher_forcing_ratio=args.teacher_forcing_ratio,
+        device=device,
+    )
+    pred_encdec, true_encdec = predict_encdec_model(encdec, test_loader, y_scaler, device)
+
+    pi_encdec = EncoderDecoderLSTMPredictor(
+        input_dim=5,
+        hidden_dim=args.hidden_dim,
+        pred_len=args.pred_len,
+        decoder_input_dim=2,
+    )
+    pi_encdec = train_encdec_model(
+        module,
+        "PI_EncDec_LSTM",
+        pi_encdec,
+        train_loader,
+        val_loader,
+        y_scaler,
+        dt=args.dt,
+        lambda_phy=args.lambda_phy,
+        epochs=args.epochs,
+        lr=args.lr,
+        teacher_forcing_ratio=args.teacher_forcing_ratio,
+        device=device,
+    )
+    pred_pi_encdec, true_pi_encdec = predict_encdec_model(pi_encdec, test_loader, y_scaler, device)
+
+    results = [
+        {"model": "EncDec_LSTM", **module.metrics_np(pred_encdec, true_encdec)},
+        {"model": f"PI_EncDec_LSTM_lambda_{args.lambda_phy}", **module.metrics_np(pred_pi_encdec, true_pi_encdec)},
+    ]
+    df = pd.DataFrame(results)
+    out_csv = out_dir / f"results_encdec_only_{label}.csv"
+    df.to_csv(out_csv, index=False)
+    print(df)
+    print(f"[OK] saved {out_csv}")
+
+    torch.save(encdec.state_dict(), out_dir / f"encdec_lstm_only_{label}.pt")
+    torch.save(pi_encdec.state_dict(), out_dir / f"pi_encdec_lstm_only_{label}.pt")
+
+    sample_idx = min(50, len(Y_test) - 1)
+    plt.figure(figsize=(7, 6))
+    hist = X_test[sample_idx, :, :2]
+    gt = Y_test[sample_idx]
+    plt.plot(hist[:, 0], hist[:, 1], "ko-", label="input history(nav)", linewidth=1)
+    plt.plot(gt[:, 0], gt[:, 1], "g-", label="ground truth", linewidth=2)
+    plt.plot(pred_encdec[sample_idx, :, 0], pred_encdec[sample_idx, :, 1], "--", label="EncDec-LSTM")
+    plt.plot(pred_pi_encdec[sample_idx, :, 0], pred_pi_encdec[sample_idx, :, 1], "--", label="PI-EncDec-LSTM")
+    plt.axis("equal")
+    plt.grid(True)
+    plt.legend()
+    plt.title(f"AUV EncDec-only comparison: {label}")
+    fig_path = out_dir / f"fig_prediction_encdec_only_{label}.png"
+    plt.tight_layout()
+    plt.savefig(fig_path, dpi=200)
+    plt.close()
+    print(f"[OK] saved {fig_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out_dir", type=str, required=True)
+    parser.add_argument("--dt", type=float, default=0.2)
+    parser.add_argument("--input_len", type=int, default=60)
+    parser.add_argument("--pred_len", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--hidden_dim", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lambda_phy", type=float, default=0.05)
+    parser.add_argument("--teacher_forcing_ratio", type=float, default=0.5)
+    parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    module = load_src()
+    module.set_seed(args.seed)
+
+    out_dir = Path(args.out_dir)
+    no_current_path = out_dir / "dataset_no_current.npz"
+    current_path = out_dir / "dataset_current.npz"
+    if not no_current_path.exists() or not current_path.exists():
+        raise FileNotFoundError("Dataset files not found in out_dir. Please point --out_dir to an existing dataset directory.")
+
+    run_encdec_only(module, no_current_path, out_dir, "no_current", args)
+    run_encdec_only(module, current_path, out_dir, "current", args)
+
+
+if __name__ == "__main__":
+    main()
