@@ -14,8 +14,10 @@
 .
 ├── auv_trajectory_smoke_experiment.py
 ├── pso_lstm_experiment.py
+├── pso_pi_lstm_experiment.py
 ├── encdec_lstm_experiment.py
 ├── encdec_lstm_physics_experiment.py
+├── compare_all_models.py
 ├── run_encdec_only.py
 ├── run_pi_rnn_only.py
 └── auv_exp_lstm_hardcurrent/
@@ -102,6 +104,25 @@ python -m pip install -r requirements.txt
 - 搜索阶段使用验证集 `RMSE` 作为 fitness
 - 找到最优超参数后，再重新训练最终 `LSTM`
 
+### `pso_pi_lstm_experiment.py`
+用于执行：
+
+- `PSO-PI-LSTM`
+
+其中：
+
+- `PSO` 搜索 `hidden_dim / num_layers / dropout / lr / batch_size / lambda_phy`
+- `Adam` 训练网络权重
+- 训练损失为 `data loss + lambda_phy * physics loss`
+- 搜索阶段使用验证集 `RMSE` 作为 fitness
+
+### `compare_all_models.py`
+用于统一汇总和可视化：
+
+- 所有已训练模型的 `ADE / FDE / RMSE / MAE`
+- 所有可用模型在同一个样本上的轨迹预测图
+- 指标对比柱状图
+
 ## 训练命令
 
 ### 1. 原始主实验脚本（会跑 EKF/RNN/PI-RNN/LSTM/PI-LSTM）
@@ -148,6 +169,33 @@ python pso_lstm_experiment.py \
   --search_val_limit 4000
 ```
 
+### 4. PSO-PI-LSTM（搜索超参数 + 搜索物理约束权重）
+
+```bash
+python pso_pi_lstm_experiment.py \
+  --out_dir ./auv_exp_lstm_hardcurrent \
+  --dataset_label current \
+  --input_len 60 \
+  --pred_len 30 \
+  --population 6 \
+  --iterations 6 \
+  --search_epochs 8 \
+  --final_epochs 50 \
+  --search_train_limit 20000 \
+  --search_val_limit 4000
+```
+
+### 5. 所有模型统一对比与出图
+
+```bash
+python compare_all_models.py \
+  --out_dir ./auv_exp_lstm_hardcurrent \
+  --dataset_label current \
+  --input_len 60 \
+  --pred_len 30 \
+  --batch_size 64
+```
+
 ## 常见输出文件
 
 ### 主实验脚本输出
@@ -174,6 +222,18 @@ python pso_lstm_experiment.py \
 - `results_pso_lstm_current.csv`
 - `fig_pso_convergence_current.png`
 - `fig_prediction_pso_lstm_current.png`
+
+### PSO-PI-LSTM 输出
+- `best_hparams_pso_pi_lstm_current.json`
+- `pso_search_history_pi_lstm_current.csv`
+- `results_pso_pi_lstm_current.csv`
+- `fig_pso_pi_convergence_current.png`
+- `fig_prediction_pso_pi_lstm_current.png`
+
+### 所有模型统一对比输出
+- `results_all_current.csv`
+- `fig_metrics_all_current.png`
+- `fig_prediction_all_models_current.png`
 
 ## 说明
 
