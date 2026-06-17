@@ -235,6 +235,79 @@ python compare_all_models.py \
 - `fig_metrics_all_current.png`
 - `fig_prediction_all_models_current.png`
 
+## Traj2/Traj4 Extreme-current 专用数据集与训练
+
+如果你想只保留 `traj2-like` 和 `traj4-like` 两类更复杂轨迹风格，并使用更强的 `mixed_extreme` 海流进行完整训练，可以直接使用下面两个脚本：
+
+- `generate_traj24_extreme_dataset.py`
+  - 只生成 `current` 数据集
+  - 轨迹风格限定为 `traj2-like / traj4-like`
+- `run_all_non_encdec_traj24.py`
+  - 顺序训练所有非 `EncDec` 模型：
+  - `EKF_like_kinematic`
+  - `RNN`
+  - `PI_RNN`
+  - `LSTM`
+  - `PI_LSTM`
+  - `PSO_LSTM`
+  - `PSO_PI_LSTM`
+  - 并自动执行统一对比与出图
+
+### 1. 只生成数据集
+
+```bash
+python generate_traj24_extreme_dataset.py \
+  --out_dir ./auv_exp_traj24_extreme \
+  --n_traj 1000 \
+  --steps 1500 \
+  --dt 0.2 \
+  --current_strength 0.72
+```
+
+### 2. 一条命令完成生成、训练、对比
+
+```bash
+python run_all_non_encdec_traj24.py \
+  --mode all \
+  --out_dir ./auv_exp_traj24_extreme \
+  --n_traj 1000 \
+  --steps 1500 \
+  --dt 0.2 \
+  --current_strength 0.72 \
+  --input_len 80 \
+  --pred_len 40 \
+  --epochs 60 \
+  --batch_size 64 \
+  --hidden_dim 128 \
+  --lambda_phy 0.05 \
+  --population 6 \
+  --iterations 6 \
+  --search_epochs 8 \
+  --final_epochs 60 \
+  --search_train_limit 20000 \
+  --search_val_limit 4000
+```
+
+### 3. 如果数据已经生成好，只训练
+
+```bash
+python run_all_non_encdec_traj24.py \
+  --mode train \
+  --out_dir ./auv_exp_traj24_extreme \
+  --input_len 80 \
+  --pred_len 40 \
+  --epochs 60 \
+  --batch_size 64 \
+  --hidden_dim 128 \
+  --lambda_phy 0.05 \
+  --population 6 \
+  --iterations 6 \
+  --search_epochs 8 \
+  --final_epochs 60 \
+  --search_train_limit 20000 \
+  --search_val_limit 4000
+```
+
 ## 说明
 
 - 所有辅助脚本已经改成相对路径，不再依赖 `/home/evawang/...`。
