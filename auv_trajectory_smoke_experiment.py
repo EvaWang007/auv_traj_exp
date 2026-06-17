@@ -552,25 +552,28 @@ def run_experiment(npz_path: Path, out_dir: Path, label: str, args):
     rnn = train_model("RNN", rnn, train_loader, val_loader, y_scaler, args.dt, 0.0, args.epochs, args.lr, device)
     pred, true, raw = predict_model(rnn, test_loader, y_scaler, device)
     results.append({"model": "RNN", **metrics_np(pred, true)})
+    torch.save(rnn.state_dict(), out_dir / f"rnn_{label}.pt")
 
     # Physics-informed RNN
     pi_rnn = RNNPredictor(input_dim=5, hidden_dim=args.hidden_dim, pred_len=args.pred_len, cell="rnn")
     pi_rnn = train_model("PI_RNN", pi_rnn, train_loader, val_loader, y_scaler, args.dt, args.lambda_phy, args.epochs, args.lr, device)
     pred_pi_rnn, true_pi_rnn, raw_pi_rnn = predict_model(pi_rnn, test_loader, y_scaler, device)
     results.append({"model": f"PI_RNN_lambda_{args.lambda_phy}", **metrics_np(pred_pi_rnn, true_pi_rnn)})
+    torch.save(pi_rnn.state_dict(), out_dir / f"pi_rnn_{label}.pt")
 
     # Vanilla LSTM
     lstm = RNNPredictor(input_dim=5, hidden_dim=args.hidden_dim, pred_len=args.pred_len, cell="lstm")
     lstm = train_model("LSTM", lstm, train_loader, val_loader, y_scaler, args.dt, 0.0, args.epochs, args.lr, device)
     pred_lstm, true_lstm, raw_lstm = predict_model(lstm, test_loader, y_scaler, device)
     results.append({"model": "LSTM", **metrics_np(pred_lstm, true_lstm)})
+    torch.save(lstm.state_dict(), out_dir / f"lstm_{label}.pt")
 
     # Physics-informed LSTM
     pi_lstm = RNNPredictor(input_dim=5, hidden_dim=args.hidden_dim, pred_len=args.pred_len, cell="lstm")
     pi_lstm = train_model("PI_LSTM", pi_lstm, train_loader, val_loader, y_scaler, args.dt, args.lambda_phy, args.epochs, args.lr, device)
     pred_pi, true_pi, raw_pi = predict_model(pi_lstm, test_loader, y_scaler, device)
     results.append({"model": f"PI_LSTM_lambda_{args.lambda_phy}", **metrics_np(pred_pi, true_pi)})
-
+    torch.save(pi_lstm.state_dict(), out_dir / f"pi_lstm_{label}.pt")
     df = pd.DataFrame(results)
     out_csv = out_dir / f"results_{label}.csv"
     df.to_csv(out_csv, index=False)
@@ -648,7 +651,7 @@ def main():
     if args.mode in ("train", "all"):
         if not no_current_path.exists() or not current_path.exists():
             raise FileNotFoundError("Dataset files not found. Run with --mode generate first.")
-        run_experiment(no_current_path, out_dir, "no_current", args)
+        #run_experiment(no_current_path, out_dir, "no_current", args)
         run_experiment(current_path, out_dir, "current", args)
 
 
