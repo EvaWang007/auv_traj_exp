@@ -1,0 +1,9 @@
+{
+  "hidden_dim": 96,
+  "num_layers": 1,
+  "dropout": 0.2,
+  "lr": 0.001,
+  "batch_size": 64,
+  "lambda_phy": 0.02,
+  "fitness_rmse": 1.462896466255188
+}
