@@ -169,6 +169,8 @@ def run_compare(module, args, out_dir: Path):
 
     def load_state(model, path):
         model.load_state_dict(torch.load(path, map_location='cpu'))
+        model.to(device)
+        model.eval()
         return model
 
     file_map = {
