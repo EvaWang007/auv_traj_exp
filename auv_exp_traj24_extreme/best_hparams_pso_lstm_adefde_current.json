@@ -1,0 +1,8 @@
+{
+  "hidden_dim": 64,
+  "num_layers": 2,
+  "dropout": 0.1,
+  "lr": 0.001,
+  "batch_size": 128,
+  "fitness_ade_fde": 13.789608478546143
+}

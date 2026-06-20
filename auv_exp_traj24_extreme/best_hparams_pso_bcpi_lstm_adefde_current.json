@@ -1,0 +1,13 @@
+{
+  "best_params": {
+    "hidden_dim": 64,
+    "dropout": 0.0,
+    "lr": 0.001,
+    "batch_size": 64,
+    "alpha_cur": 0.05,
+    "alpha_bias": 0.2,
+    "alpha_pi": 0.05,
+    "beta_smooth": 0.005
+  },
+  "best_fitness_ade_fde": 13.430447578430176
+}
